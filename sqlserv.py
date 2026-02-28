@@ -72,6 +72,28 @@ def enforce_limit(query: str):
         query = query.replace("SELECT", f"SELECT TOP {MAX_ROWS}", 1)
     return query
 
+@mcp.prompt(name="generate_sql")
+def generate_sql(natural_query: str, schema_info: str) -> str:
+    return f"""
+You are a senior SQL Server expert.
+
+Convert the following natural language request into a SQL Server (T-SQL) query.
+
+Rules:
+- Use SQL Server syntax.
+- Use TOP instead of LIMIT.
+- Do not generate INSERT, UPDATE, DELETE, DROP.
+- Only generate SELECT queries.
+- Use schema-qualified table names (e.g., Sales.SalesOrderHeader).
+- No explanations, only SQL.
+
+Database schema:
+{schema_info}
+
+User request:
+{natural_query}
+"""
+
 @mcp.tool(
     name="list_databases",
     description="List all SQL Server databases"
