@@ -1,8 +1,17 @@
 import os
 import logging
 import pyodbc
-from dotenv import load_dotenv
+from typing import Any
+import httpx
 from mcp.server.fastmcp import FastMCP
+from starlette.applications import Starlette
+from mcp.server.sse import SseServerTransport
+from starlette.requests import Request
+from starlette.routing import Mount, Route
+from mcp.server import Server
+import uvicorn
+from dotenv import load_dotenv
+import logging
 
 logging.basicConfig(
     level=logging.INFO,
@@ -333,6 +342,55 @@ def hello_sqlserver(name: str = "World") -> str:
         if "conn" in locals():
             conn.close()
 
+
+def create_starlette_app(mcp_server: Server, *, debug: bool = False) -> Starlette:
+    """Create a Starlette application that can serve the provided mcp server with SSE."""
+    sse = SseServerTransport("/messages/")
+    
+    async def handle_sse(request: Request):
+        try:
+            logger.info("SSE connection initiated")
+            async with sse.connect_sse(
+                request.scope,
+                request.receive,
+                request._send,
+            ) as (read_stream, write_stream):
+                logger.info("SSE connection established, starting MCP server")
+                await mcp_server.run(
+                    read_stream,
+                    write_stream,
+                    mcp_server.create_initialization_options(),
+                )
+        except Exception as e:
+            logger.error(f"Error in SSE handler: {e}")
+            raise
+    
+    return Starlette(
+        debug=debug,
+        routes=[
+            Route("/sse", endpoint=handle_sse, methods=["GET"]),
+            Mount("/messages/", app=sse.handle_post_message),
+        ],
+    )
+
 if __name__ == "__main__":
-    print("Starting SQL Server MCP server...")
-    mcp.serve()
+    # Get the MCP server instance
+    mcp_server = mcp._mcp_server
+    
+    import argparse
+    parser = argparse.ArgumentParser(description='Run MCP SSE-based server')
+    parser.add_argument('--host', default='0.0.0.0', help='Host to bind to')
+    parser.add_argument('--port', type=int, default=8080, help='Port to listen on')
+    args = parser.parse_args()
+    
+    
+    starlette_app = create_starlette_app(mcp_server, debug=True)
+    
+    # Run the server
+    try:
+        uvicorn.run(starlette_app, host=args.host, port=args.port)
+    except KeyboardInterrupt:
+        print("\nServer stopped by user")
+    except Exception as e:
+        logger.error(f"Server error: {e}")
+        raise
