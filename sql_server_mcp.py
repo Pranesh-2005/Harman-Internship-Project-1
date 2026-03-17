@@ -11,12 +11,21 @@ from starlette.routing import Mount, Route
 from mcp.server import Server
 import uvicorn
 from dotenv import load_dotenv
-import logging
+import matplotlib.pyplot as plt
+import matplotlib
+import io
+import base64
+from datetime import datetime
+import json
+from pathlib import Path
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
+
+CHARTS_DIR = Path("charts")
+CHARTS_DIR.mkdir(exist_ok=True)
 
 logger = logging.getLogger("mcp-sqlserver")
 
@@ -341,6 +350,342 @@ def hello_sqlserver(name: str = "World") -> str:
             cur.close()
         if "conn" in locals():
             conn.close()
+
+# Visualisation Tools
+
+@mcp.tool(
+    name="visualize_data",
+    description="Create matplotlib visualization from data"
+)
+def visualize_data(
+    data_json: str,
+    chart_type: str = "line",
+    title: str = "Data Visualization",
+    xlabel: str = "X Axis",
+    ylabel: str = "Y Axis",
+    figsize: str = "12,6"
+) -> str:
+    """
+    Create a matplotlib visualization from JSON data.
+    Saves as PNG file and returns file path.
+    
+    Args:
+        data_json: JSON string with data
+        chart_type: Type of chart - line, bar, scatter, pie, histogram
+        title: Chart title
+        xlabel: X-axis label
+        ylabel: Y-axis label
+        figsize: Figure size as "width,height"
+    
+    Returns:
+        File path to saved PNG chart
+    """
+    try:
+        # Parse data
+        data = json.loads(data_json)
+        fig_w, fig_h = map(float, figsize.split(','))
+        
+        # Create figure
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+        
+        # Extract data
+        x = data.get("x", [])
+        y = data.get("y", [])
+        labels = data.get("labels", None)
+        
+        # Create chart based on type
+        if chart_type.lower() == "line":
+            ax.plot(x, y, marker='o', linewidth=2, markersize=6)
+            ax.set_xlabel(xlabel, fontsize=12)
+            ax.set_ylabel(ylabel, fontsize=12)
+            ax.grid(True, alpha=0.3)
+            
+        elif chart_type.lower() == "bar":
+            ax.bar(x, y, color='steelblue', edgecolor='navy', alpha=0.7)
+            ax.set_xlabel(xlabel, fontsize=12)
+            ax.set_ylabel(ylabel, fontsize=12)
+            ax.tick_params(axis='x', rotation=45)
+            
+        elif chart_type.lower() == "scatter":
+            ax.scatter(x, y, s=100, alpha=0.6, edgecolors='navy')
+            ax.set_xlabel(xlabel, fontsize=12)
+            ax.set_ylabel(ylabel, fontsize=12)
+            ax.grid(True, alpha=0.3)
+            
+        elif chart_type.lower() == "pie":
+            colors = plt.cm.Set3(range(len(y)))
+            ax.pie(y, labels=labels or x, autopct='%1.1f%%', colors=colors)
+            
+        elif chart_type.lower() == "histogram":
+            ax.hist(y, bins=20, color='steelblue', edgecolor='navy', alpha=0.7)
+            ax.set_xlabel(xlabel, fontsize=12)
+            ax.set_ylabel(ylabel, fontsize=12)
+            
+        else:
+            return f"Unknown chart type: {chart_type}"
+        
+        # Set title
+        ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
+        plt.tight_layout()
+        
+        # Generate unique filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{chart_type}_{timestamp}.png"
+        filepath = CHARTS_DIR / filename
+        
+        # Save chart
+        plt.savefig(filepath, format='png', dpi=100, bbox_inches='tight')
+        plt.close(fig)
+        
+        logger.info(f"Chart saved: {filepath}")
+        return str(filepath)
+    
+    except json.JSONDecodeError:
+        return f"Invalid JSON format"
+    except Exception as e:
+        logger.exception("visualize_data failed")
+        return f"Visualization error: {str(e)}"
+
+
+@mcp.tool(
+    name="plot_query_results",
+    description="Execute query and create visualization"
+)
+def plot_query_results(
+    query: str,
+    chart_type: str = "bar",
+    title: str = "Query Results",
+    x_column: str = None,
+    y_column: str = None
+) -> str:
+    """
+    Execute a SQL query and create a visualization.
+    Returns file path to saved chart.
+    """
+    try:
+        validate_query(query)
+        query = enforce_limit(query)
+        
+        conn = connect()
+        cur = conn.cursor()
+        cur.execute(query)
+        
+        rows = cur.fetchall()
+        
+        if not rows:
+            return "No data to visualize"
+        
+        # Get column names
+        cols = [column[0] for column in cur.description]
+        
+        # Use first two columns if not specified
+        if not x_column or x_column not in cols:
+            x_column = cols[0]
+        if not y_column or y_column not in cols:
+            y_column = cols[1] if len(cols) > 1 else cols[0]
+        
+        # Extract data
+        x_data = []
+        y_data = []
+        
+        for row in rows:
+            row_dict = dict(zip(cols, row))
+            x_val = row_dict.get(x_column)
+            y_val = row_dict.get(y_column)
+            
+            # Convert to numeric
+            try:
+                if isinstance(y_val, str):
+                    y_val = float(y_val)
+            except (ValueError, TypeError):
+                y_val = 0
+            
+            x_data.append(str(x_val) if x_val else "")
+            y_data.append(y_val)
+        
+        # Create visualization
+        viz_data = {"x": x_data, "y": y_data}
+        
+        result = visualize_data(
+            json.dumps(viz_data),
+            chart_type=chart_type,
+            title=title,
+            xlabel=x_column,
+            ylabel=y_column
+        )
+        
+        cur.close()
+        conn.close()
+        
+        return result
+    
+    except ValueError as e:
+        return f"Blocked: {e}"
+    except Exception as e:
+        logger.exception("plot_query_results failed")
+        return f"Error: {str(e)}"
+
+
+@mcp.tool(
+    name="multi_series_plot",
+    description="Create multi-series visualization"
+)
+def multi_series_plot(
+    data_json: str,
+    chart_type: str = "line",
+    title: str = "Multi-Series Plot"
+) -> str:
+    """
+    Create visualization with multiple data series.
+    Returns file path to saved chart.
+    """
+    try:
+        data = json.loads(data_json)
+        x = data.get("x", [])
+        series_dict = data.get("series", {})
+        
+        fig, ax = plt.subplots(figsize=(14, 7))
+        
+        colors = plt.cm.tab10(range(len(series_dict)))
+        
+        for (series_name, y_values), color in zip(series_dict.items(), colors):
+            if chart_type.lower() == "line":
+                ax.plot(x, y_values, marker='o', label=series_name, linewidth=2, color=color)
+            elif chart_type.lower() == "bar":
+                offset = len(series_dict) // 2
+                positions = [i + offset for i in range(len(x))]
+                ax.bar(positions, y_values, label=series_name, alpha=0.8, color=color)
+            elif chart_type.lower() == "scatter":
+                ax.scatter(x, y_values, label=series_name, s=100, alpha=0.6, color=color)
+        
+        ax.set_xlabel("X Axis", fontsize=12)
+        ax.set_ylabel("Y Axis", fontsize=12)
+        ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
+        ax.legend(loc='best', fontsize=10)
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        # Save chart
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"multi_{chart_type}_{timestamp}.png"
+        filepath = CHARTS_DIR / filename
+        
+        plt.savefig(filepath, format='png', dpi=100, bbox_inches='tight')
+        plt.close(fig)
+        
+        logger.info(f"Multi-series chart saved: {filepath}")
+        return str(filepath)
+    
+    except Exception as e:
+        logger.exception("multi_series_plot failed")
+        return f"Error: {str(e)}"
+
+
+@mcp.tool(
+    name="statistical_plot",
+    description="Create statistical plots (boxplot, violin, histogram)"
+)
+def statistical_plot(
+    data_json: str,
+    plot_type: str = "boxplot",
+    title: str = "Statistical Plot"
+) -> str:
+    """
+    Create statistical visualizations.
+    Returns file path to saved chart.
+    """
+    try:
+        import numpy as np
+        
+        data = json.loads(data_json)
+        values = data.get("values", [])
+        
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        if plot_type.lower() == "boxplot":
+            ax.boxplot(values, labels=data.get("labels", ["Data"]))
+            ax.set_ylabel("Values", fontsize=12)
+            
+        elif plot_type.lower() == "violin":
+            parts = ax.violinplot(values, showmeans=True, showmedians=True)
+            ax.set_ylabel("Values", fontsize=12)
+            
+        elif plot_type.lower() == "histogram":
+            ax.hist(values, bins=20, color='steelblue', edgecolor='navy', alpha=0.7)
+            ax.set_xlabel("Values", fontsize=12)
+            ax.set_ylabel("Frequency", fontsize=12)
+        
+        ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
+        plt.tight_layout()
+        
+        # Save chart
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"stats_{plot_type}_{timestamp}.png"
+        filepath = CHARTS_DIR / filename
+        
+        plt.savefig(filepath, format='png', dpi=100, bbox_inches='tight')
+        plt.close(fig)
+        
+        logger.info(f"Statistical plot saved: {filepath}")
+        return str(filepath)
+    
+    except Exception as e:
+        logger.exception("statistical_plot failed")
+        return f"Error: {str(e)}"
+
+
+@mcp.tool(
+    name="get_chart_list",
+    description="List all generated charts"
+)
+def get_chart_list() -> str:
+    """List all generated charts in the charts directory"""
+    try:
+        charts = sorted(CHARTS_DIR.glob("*.png"), key=lambda x: x.stat().st_mtime, reverse=True)
+        
+        if not charts:
+            return "No charts generated yet"
+        
+        result = ["📊 Generated Charts (Most Recent First):\n"]
+        for i, chart in enumerate(charts[:20], 1):  # Show last 20
+            size_kb = chart.stat().st_size / 1024
+            result.append(f"{i}. {chart.name} ({size_kb:.1f} KB)")
+        
+        return "\n".join(result)
+    
+    except Exception as e:
+        logger.exception("get_chart_list failed")
+        return f"Error: {str(e)}"
+
+
+@mcp.tool(
+    name="open_chart",
+    description="Open a chart file in default viewer"
+)
+def open_chart(filename: str) -> str:
+    """Open a chart file"""
+    try:
+        filepath = CHARTS_DIR / filename
+        
+        if not filepath.exists():
+            return f"Chart not found: {filename}"
+        
+        import subprocess
+        import platform
+        
+        if platform.system() == "Windows":
+            os.startfile(filepath)
+        elif platform.system() == "Darwin":  # macOS
+            subprocess.run(["open", str(filepath)])
+        else:  # Linux
+            subprocess.run(["xdg-open", str(filepath)])
+        
+        return f"✅ Opening chart: {filename}"
+    
+    except Exception as e:
+        logger.exception("open_chart failed")
+        return f"Error: {str(e)}"
 
 
 def create_starlette_app(mcp_server: Server, *, debug: bool = False) -> Starlette:

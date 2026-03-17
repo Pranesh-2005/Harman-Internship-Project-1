@@ -78,7 +78,7 @@ class MCPClient:
             available_tools.append(tool_def)
 
         final_text = []
-        max_rounds = 10  # Prevent infinite loops
+        max_rounds = 20  # Prevent infinite loops
         round_count = 0
 
         while round_count < max_rounds:
